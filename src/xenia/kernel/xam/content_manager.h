@@ -86,6 +86,9 @@ class ContentManager {
 
   bool ContentExists(const uint64_t xuid, const XCONTENT_DATA_INTERNAL& data);
 
+  // Copy bundled DLC/content into the content root; no overwrite.
+  void InstallBundledContent();
+
   X_RESULT CreateContent(const std::string_view root_name, const uint64_t xuid,
                          const XCONTENT_DATA_INTERNAL& data);
   X_RESULT OpenContent(const std::string_view root_name, const uint64_t xuid,
@@ -129,6 +132,7 @@ class ContentManager {
       const XContentType content_type) const;
   std::filesystem::path ResolvePackagePath(const uint64_t xuid,
                                            const XCONTENT_DATA_INTERNAL& data);
+  std::filesystem::path FindBundledContentRoot() const;
   std::unordered_set<uint32_t> FindPublisherTitleIds(
       const uint64_t xuid,
       uint32_t base_title_id = kCurrentlyRunningTitleId) const;

@@ -22,6 +22,8 @@
 
 #include "xenia/app/console_settings_dialog.h"
 #include "xenia/app/content_list_dialog.h"
+#include "xenia/app/keyboard_settings_dialog.h"
+#include "xenia/app/netplay_link_dialog.h"
 #include "xenia/app/port_permission_dialog.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
@@ -960,6 +962,10 @@ bool EmulatorWindow::Initialize() {
     hid_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&Display controller hotkeys", "",
         std::bind(&EmulatorWindow::DisplayHotKeysConfig, this)));
+    hid_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
+    hid_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "&Keyboard bindings...", "",
+        std::bind(&EmulatorWindow::ToggleKeyboardSettingsDialog, this)));
   }
   main_menu->AddChild(std::move(hid_menu));
 
@@ -991,6 +997,10 @@ bool EmulatorWindow::Initialize() {
     Netplay_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&Settings", "",
         std::bind(&EmulatorWindow::ToggleNetplaySettingsDialog, this)));
+
+    Netplay_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "Mega Man 10 &link status...", "",
+        std::bind(&EmulatorWindow::ToggleNetplayLinkDialog, this)));
 
     Netplay_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&Manager", "",
@@ -1135,6 +1145,12 @@ void EmulatorWindow::ApplyDisplayConfigForCvars() {
 }
 
 void EmulatorWindow::OnKeyDown(ui::KeyEvent& e) {
+  // Key capture before game/ImGui.
+  if (keyboard_settings_dialog_ && keyboard_settings_dialog_->OnCaptureKey(e)) {
+    e.set_handled(true);
+    return;
+  }
+
   if (!emulator_initialized_) {
     return;
   }
@@ -1848,6 +1864,19 @@ void EmulatorWindow::ToggleConsoleSettingsDialog() {
   }
 }
 
+void EmulatorWindow::ToggleKeyboardSettingsDialog() {
+  if (!keyboard_settings_dialog_) {
+    keyboard_settings_dialog_ = std::unique_ptr<KeyboardSettingsDialog>(
+        new KeyboardSettingsDialog(imgui_drawer_.get(), *this));
+  } else {
+    if (keyboard_settings_dialog_->IsClosing()) {
+      keyboard_settings_dialog_.release();
+    } else {
+      keyboard_settings_dialog_.reset();
+    }
+  }
+}
+
 void EmulatorWindow::ToggleContentListDialog() {
   if (!content_list_dialog_) {
     content_list_dialog_ = std::unique_ptr<ContentListDialog>(
@@ -1997,6 +2026,19 @@ void EmulatorWindow::ToggleNetplayStatusDialog() {
       netplay_status_dialog_.reset();
     }
     emulator_->kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+  }
+}
+
+void EmulatorWindow::ToggleNetplayLinkDialog() {
+  if (!netplay_link_dialog_) {
+    netplay_link_dialog_ =
+        std::make_unique<NetplayLinkDialog>(imgui_drawer_.get(), *this);
+  } else {
+    if (netplay_link_dialog_->IsClosing()) {
+      netplay_link_dialog_.release();
+    } else {
+      netplay_link_dialog_.reset();
+    }
   }
 }
 
@@ -2744,6 +2786,10 @@ void EmulatorWindow::ClearDialogs() {
     content_list_dialog_.reset();
   }
 
+  if (keyboard_settings_dialog_) {
+    keyboard_settings_dialog_.reset();
+  }
+
   if (xmp_config_dialog_) {
     xmp_config_dialog_.reset();
   }
@@ -2770,6 +2816,10 @@ void EmulatorWindow::ClearDialogs() {
 
   if (netplay_status_dialog_) {
     netplay_status_dialog_.reset();
+  }
+
+  if (netplay_link_dialog_) {
+    netplay_link_dialog_.reset();
   }
 
   imgui_drawer_.get()->ClearDialogs();

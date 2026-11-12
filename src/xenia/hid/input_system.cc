@@ -14,6 +14,8 @@
 #include "xenia/base/profiling.h"
 #include "xenia/hid/hid_flags.h"
 #include "xenia/hid/input_driver.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/netplay/netplay_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 
 #ifdef XE_PLATFORM_WIN32
@@ -22,6 +24,26 @@
 
 namespace xe {
 namespace hid {
+
+namespace {
+
+// Netplay has one local player per instance. Hide guests 1-3 from the game so
+// its controller scan can only settle on the signed-in user 0; otherwise a
+// second pad, or a pad that enumerates at a higher XInput index, makes Mega
+// Man 10 try to mount a signed-out user's saves and stall on the sign-in
+// prompt.
+bool NetplayHidesUser(uint32_t user_index) {
+  if (user_index >= XUserMaxUserCount) {
+    return false;
+  }
+  auto* state = kernel::kernel_state();
+  if (!state || !state->netplay()) {
+    return false;
+  }
+  return state->netplay()->IsActive() && user_index != 0;
+}
+
+}  // namespace
 
 DEFINE_bool(vibration, true, "Toggle controller vibration.", "HID");
 
@@ -101,6 +123,10 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
                                       X_INPUT_CAPABILITIES* out_caps) {
   SCOPE_profile_cpu_f("hid");
 
+  if (NetplayHidesUser(user_index)) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+
   std::vector<InputDriver*> filtered_drivers = FilterDrivers(flags);
 
   for (auto& driver : filtered_drivers) {
@@ -116,30 +142,90 @@ X_RESULT InputSystem::GetState(uint32_t user_index, uint32_t flags,
                                X_INPUT_STATE* out_state) {
   SCOPE_profile_cpu_f("hid");
 
+  if (NetplayHidesUser(user_index)) {
+    // Clear a slot that may have been reported before netplay took over, so
+    // the game's controller scan does not keep seeing it.
+    UpdateUsedSlot(nullptr, static_cast<uint8_t>(user_index), false);
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+
   std::vector<InputDriver*> filtered_drivers = FilterDrivers(flags);
   if (filtered_drivers.empty()) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
-  for (auto& driver : filtered_drivers) {
-    X_RESULT result = driver->GetState(user_index, out_state);
-    if (result == X_ERROR_SUCCESS) {
-      UpdateUsedSlot(driver, user_index, true);
-      AdjustDeadzoneLevels(user_index, &out_state->gamepad);
+  // Combine every driver that reports the slot instead of stopping at the
+  // first one. The keyboard driver runs after the controller drivers, so with
+  // first-wins semantics a connected pad would make the keyboard unusable -
+  // even though keyboard mode is enabled by default. Pad and keyboard can be
+  // used at the same time; buttons and triggers are combined, and for each
+  // stick axis the larger deflection wins.
+  auto merge_axis = [](int16_t destination, int16_t source) {
+    const int32_t destination_abs =
+        destination < 0 ? -static_cast<int32_t>(destination) : destination;
+    const int32_t source_abs =
+        source < 0 ? -static_cast<int32_t>(source) : source;
+    return source_abs > destination_abs ? source : destination;
+  };
 
-      if (out_state->gamepad.buttons != 0) {
-        last_used_slot = user_index;
-      }
-      return result;
+  X_INPUT_STATE merged_state = {};
+  InputDriver* first_driver = nullptr;
+  for (auto& driver : filtered_drivers) {
+    X_INPUT_STATE driver_state = {};
+    X_RESULT result = driver->GetState(user_index, &driver_state);
+    if (result != X_ERROR_SUCCESS) {
+      continue;
     }
+    if (!first_driver) {
+      first_driver = driver;
+      merged_state = driver_state;
+      continue;
+    }
+    merged_state.gamepad.buttons |= driver_state.gamepad.buttons;
+    if (driver_state.gamepad.left_trigger > merged_state.gamepad.left_trigger) {
+      merged_state.gamepad.left_trigger = driver_state.gamepad.left_trigger;
+    }
+    if (driver_state.gamepad.right_trigger >
+        merged_state.gamepad.right_trigger) {
+      merged_state.gamepad.right_trigger = driver_state.gamepad.right_trigger;
+    }
+    merged_state.gamepad.thumb_lx =
+        merge_axis(merged_state.gamepad.thumb_lx.get(),
+                   driver_state.gamepad.thumb_lx.get());
+    merged_state.gamepad.thumb_ly =
+        merge_axis(merged_state.gamepad.thumb_ly.get(),
+                   driver_state.gamepad.thumb_ly.get());
+    merged_state.gamepad.thumb_rx =
+        merge_axis(merged_state.gamepad.thumb_rx.get(),
+                   driver_state.gamepad.thumb_rx.get());
+    merged_state.gamepad.thumb_ry =
+        merge_axis(merged_state.gamepad.thumb_ry.get(),
+                   driver_state.gamepad.thumb_ry.get());
   }
-  UpdateUsedSlot(nullptr, user_index, false);
-  return X_ERROR_DEVICE_NOT_CONNECTED;
+
+  if (!first_driver) {
+    UpdateUsedSlot(nullptr, user_index, false);
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+
+  *out_state = merged_state;
+  UpdateUsedSlot(first_driver, user_index, true);
+  AdjustDeadzoneLevels(user_index, &out_state->gamepad);
+
+  if (out_state->gamepad.buttons != 0) {
+    last_used_slot = user_index;
+  }
+  return X_ERROR_SUCCESS;
 }
 
 X_RESULT InputSystem::SetState(uint32_t user_index,
                                X_INPUT_VIBRATION* vibration) {
   SCOPE_profile_cpu_f("hid");
+
+  if (NetplayHidesUser(user_index)) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+
   X_INPUT_VIBRATION modified_vibration = ModifyVibrationLevel(vibration);
   for (auto& driver : drivers_) {
     X_RESULT result = driver->SetState(user_index, &modified_vibration);
@@ -153,6 +239,10 @@ X_RESULT InputSystem::SetState(uint32_t user_index,
 X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
                                    X_INPUT_KEYSTROKE* out_keystroke) {
   SCOPE_profile_cpu_f("hid");
+
+  if (NetplayHidesUser(user_index)) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
 
   std::vector<InputDriver*> filtered_drivers = FilterDrivers(flags);
 

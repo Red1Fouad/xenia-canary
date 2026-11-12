@@ -14,6 +14,7 @@
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/XLiveAPI.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/netplay/netplay_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/friends_util.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -2166,6 +2167,16 @@ X_RESULT xeXamShowSigninUI(uint32_t user_index, uint32_t users_needed,
   // Games seem to sit and loop until we trigger sign in notification.
   if (users_needed != 1 && users_needed != 2 && users_needed != 4) {
     return X_ERROR_INVALID_PARAMETER;
+  }
+
+  // Netplay already signed in: skip picker.
+  if (kernel_state()->netplay() && kernel_state()->netplay()->IsActive() &&
+      kernel_state()->xam_state()->profile_manager()->IsAnyProfileSignedIn()) {
+    XELOGI(
+        "netplay: profile picker user {} users_needed {} flags {:08X} "
+        "answered by the signed-in profile",
+        user_index, users_needed, flags);
+    return X_ERROR_SUCCESS;
   }
 
   if (cvars::headless) {

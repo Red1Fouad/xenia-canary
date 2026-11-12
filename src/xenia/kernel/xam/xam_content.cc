@@ -17,6 +17,7 @@
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_content_device.h"
 #include "xenia/kernel/xam/xam_module.h"
+#include "xenia/kernel/netplay/netplay_state.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
@@ -65,14 +66,21 @@ dword_result_t XamContentGetLicenseMask_entry(lpdword_t mask_ptr,
   auto run = [mask_ptr](uint32_t& extended_error, uint32_t& length) {
     X_RESULT result = X_E_FAIL;
 
+    // Netplay: full license mask.
+    NetplayState* netplay = kernel_state()->netplay();
+    const bool netplay_active = netplay && netplay->IsActive();
+
     // Remark: This cannot be reflected as on console. Xenia can boot games
     // directly and XBLA games can be repacked to ZAR. For these titles we must
     // provide some license. Normally it should fail for OpticalDisc type.
-    if (kernel_state()->deployment_type_ != XDeploymentType::kOther) {
+    if (netplay_active ||
+        kernel_state()->deployment_type_ != XDeploymentType::kOther) {
       // Each bit in the mask represents a granted license. Available licenses
       // seems to vary from game to game, but most appear to use bit 0 to
       // indicate if the game is purchased or not.
-      *mask_ptr = static_cast<uint32_t>(cvars::license_mask);
+      *mask_ptr = netplay_active
+                      ? 0xFFFFFFFFu
+                      : static_cast<uint32_t>(cvars::license_mask);
       result = X_ERROR_SUCCESS;
     }
 

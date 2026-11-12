@@ -8,6 +8,7 @@
  */
 
 #include <algorithm>
+#include <cstring>
 #include <mutex>
 #include <random>
 
@@ -21,6 +22,8 @@
 #include "xenia/base/logging.h"
 #include "xenia/kernel/XLiveAPI.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/netplay/netplay_sockets.h"
+#include "xenia/kernel/netplay/netplay_state.h"
 #include "xenia/kernel/util/net_utils.h"
 #include "xenia/kernel/util/network_adapter_manager_interface.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -82,8 +85,18 @@ void Update_XNetStartupParams(XNetStartupParams& dest,
 
 bool IsXNetInitialized() { return initialized_xnet_; }
 
+// Active netplay only; null otherwise.
+static NetplayState* NetplayFor(KernelState* state) {
+  NetplayState* netplay = state ? state->netplay() : nullptr;
+  return netplay && netplay->IsActive() ? netplay : nullptr;
+}
+
 dword_result_t NetDll_XNetStartup_entry(dword_t caller,
                                         pointer_t<XNetStartupParams> params) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    netplay->EnsureStarted();
+  }
+
   if (initialized_xnet_) {
     return X_ERROR_SUCCESS;
   }
@@ -283,6 +296,10 @@ DECLARE_XAM_EXPORT1(NetDll_XNetRandom, kNetworking, kImplemented);
 
 dword_result_t NetDll_WSAStartup_entry(dword_t caller, word_t version,
                                        pointer_t<X_WSADATA> data_ptr) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    netplay->EnsureStarted();
+  }
+
   // TODO(benvanik): abstraction layer needed.
   int ret = 0;
 
@@ -362,6 +379,10 @@ DECLARE_XAM_EXPORT1(NetDll_WSACleanup, kNetworking, kStub);
 // Xbox shares space between normal error codes and WSA errors.
 // This under the hood returns directly value received from RtlGetLastError.
 dword_result_t NetDll_WSAGetLastError_entry() {
+  if (NetplayFor(kernel_state())) {
+    return NetplaySockets::LastError();
+  }
+
   uint32_t last_error = XThread::GetLastError();
   XELOGD("NetDll_WSAGetLastError: {}", last_error);
 
@@ -575,6 +596,15 @@ DECLARE_XAM_EXPORT1(NetDll_WSASetEvent, kNetworking, kImplemented);
 // Sets the console IP address.
 dword_result_t NetDll_XNetGetTitleXnAddr_entry(dword_t caller,
                                                pointer_t<XNADDR> XnAddr_ptr) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    uint8_t xnaddr[NetplayState::kXnAddrSize];
+    netplay->FillSelfXnAddr(xnaddr);
+    if (XnAddr_ptr) {
+      netplay->GuestWrite(XnAddr_ptr.guest_address(), xnaddr, sizeof xnaddr);
+    }
+    return 0xE6;  // Ethernet, static, gateway, DNS and online.
+  }
+
   XnAddr_ptr.Zero();
 
   // 415607D1, 4D5307E6
@@ -768,6 +798,23 @@ dword_result_t NetDll_XNetXnAddrToInAddr_entry(dword_t caller,
                                                pointer_t<XNADDR> xn_addr,
                                                pointer_t<XNKID> xid,
                                                pointer_t<in_addr> in_addr) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    if (!in_addr) {
+      return X_WSA_ERROR::X_WSAEFAULT;
+    }
+    uint8_t self[NetplayState::kXnAddrSize] = {};
+    uint8_t given[NetplayState::kXnAddrSize] = {};
+    netplay->FillSelfXnAddr(self);
+    if (xn_addr) {
+      netplay->GuestRead(xn_addr.guest_address(), given, sizeof given);
+    }
+    const uint32_t resolved =
+        std::memcmp(given, self, sizeof self) ? NetplayState::kPeerInAddr
+                                              : NetplayState::kSelfInAddr;
+    netplay->Write32(in_addr.guest_address(), resolved);
+    return X_ERROR_SUCCESS;
+  }
+
   in_addr.Zero();
 
   // 494707E4, 4E4D07D1
@@ -796,6 +843,19 @@ DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToInAddr, kNetworking, kSketchy);
 dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, dword_t in_addr,
                                                pointer_t<XNADDR> xn_addr,
                                                pointer_t<XNKID> xid_ptr) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    if (xn_addr) {
+      uint8_t xnaddr[NetplayState::kXnAddrSize];
+      netplay->FillSelfXnAddr(xnaddr);
+      netplay->GuestWrite(xn_addr.guest_address(), xnaddr, sizeof xnaddr);
+    }
+    if (xid_ptr) {
+      uint8_t zero[16] = {};
+      netplay->GuestWrite(xid_ptr.guest_address(), zero, sizeof zero);
+    }
+    return X_ERROR_SUCCESS;
+  }
+
   if (xn_addr) {
     memset(xn_addr, 0, sizeof(XNADDR));
   }
@@ -1062,6 +1122,11 @@ dword_result_t NetDll_XNetQosServiceLookup_entry(dword_t caller, dword_t flags,
   XELOGI("XNetQosServiceLookup({}, {:08X}, {:08X}, {:08X})", caller.value(),
          flags.value(), event_handle.value(), qos_ptr.guest_address());
 
+  if (NetplayFor(kernel_state())) {
+    // Link carries traffic; report down so game uses LAN path.
+    return 0x2742u;  // WSAENETDOWN
+  }
+
   if (!qos_ptr) {
     return X_WSA_ERROR::X_WSAEINVAL;
   }
@@ -1119,6 +1184,11 @@ DECLARE_XAM_EXPORT1(NetDll_XNetQosServiceLookup, kNetworking, kStub);
 
 dword_result_t NetDll_XNetQosRelease_entry(dword_t caller,
                                            pointer_t<XNQOS> qos_ptr) {
+  if (NetplayFor(kernel_state())) {
+    // One block per title; nothing to release.
+    return X_ERROR_SUCCESS;
+  }
+
   if (!qos_ptr) {
     return X_WSA_ERROR::X_WSAEINVAL;
   }
@@ -1177,6 +1247,14 @@ dword_result_t NetDll_XNetQosListen_entry(
     XELOGI("XNetQosListen XNET_QOS_LISTEN_RELEASE");
   }
 
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    // Keep host QoS blob for the search reply.
+    if ((flags & XNET_QOS_LISTEN_SET_DATA) && data && data_size > 0) {
+      netplay->SessionSetHostQos(data.guest_address(), data_size.value());
+    }
+    return X_ERROR_SUCCESS;
+  }
+
   if (data_size <= 0) {
     return X_ERROR_SUCCESS;
   }
@@ -1225,6 +1303,16 @@ dword_result_t NetDll_XNetQosLookup_entry(
     dword_t event_handle, lpdword_t qos_ptr) {
   if (!qos_ptr) {
     return X_WSA_ERROR::X_WSAEACCES;
+  }
+
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    // Answer from link: one complete result with measured RTT.
+    if (!netplay->SessionQosLookup(num_remote_consoles.value(),
+                                   qos_ptr.guest_address(),
+                                   event_handle.value())) {
+      return X_WSA_ERROR::X_WSAEFAULT;
+    }
+    return X_ERROR_SUCCESS;
   }
 
   auto session_ids = std::make_shared<std::vector<XNKID>>();
@@ -1910,6 +1998,11 @@ DECLARE_XAM_EXPORT1(NetDll_inet_addr, kNetworking, kImplemented);
 bool optEnable = true;
 dword_result_t NetDll_socket_entry(dword_t caller, dword_t af, dword_t type,
                                    dword_t protocol) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    std::lock_guard<std::mutex> lock(netplay->mutex());
+    return netplay->sockets()->Socket(af, type, protocol);
+  }
+
   if (!winsock_reference_count_) {
     XThread::SetLastError(X_WSA_ERROR::X_WSANOTINITIALISED);
     return -1;
@@ -1937,6 +2030,11 @@ dword_result_t NetDll_socket_entry(dword_t caller, dword_t af, dword_t type,
 DECLARE_XAM_EXPORT1(NetDll_socket, kNetworking, kImplemented);
 
 dword_result_t NetDll_closesocket_entry(dword_t caller, dword_t socket_handle) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    std::lock_guard<std::mutex> lock(netplay->mutex());
+    return netplay->sockets()->CloseSocket(socket_handle);
+  }
+
   auto socket =
       kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
@@ -2033,6 +2131,12 @@ DECLARE_XAM_EXPORT1(NetDll_getsockopt, kNetworking, kImplemented);
 
 dword_result_t NetDll_ioctlsocket_entry(dword_t caller, dword_t socket_handle,
                                         dword_t cmd, lpvoid_t arg_ptr) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    std::lock_guard<std::mutex> lock(netplay->mutex());
+    return netplay->sockets()->IoctlSocket(socket_handle, cmd,
+                                           arg_ptr.guest_address());
+  }
+
   auto socket =
       kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
@@ -2056,6 +2160,11 @@ DECLARE_XAM_EXPORT1(NetDll_ioctlsocket, kNetworking, kImplemented);
 dword_result_t NetDll_bind_entry(dword_t caller, dword_t socket_handle,
                                  pointer_t<XSOCKADDR_IN> name,
                                  dword_t namelen) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    std::lock_guard<std::mutex> lock(netplay->mutex());
+    return netplay->sockets()->Bind(socket_handle, name.guest_address());
+  }
+
   auto socket =
       kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
@@ -2111,6 +2220,11 @@ DECLARE_XAM_EXPORT1(NetDll_bind, kNetworking, kImplemented);
 dword_result_t NetDll_connect_entry(dword_t caller, dword_t socket_handle,
                                     pointer_t<XSOCKADDR_IN> name,
                                     dword_t namelen) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    std::lock_guard<std::mutex> lock(netplay->mutex());
+    return netplay->sockets()->Connect(socket_handle, name.guest_address());
+  }
+
   auto socket =
       kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
@@ -2130,6 +2244,11 @@ DECLARE_XAM_EXPORT1(NetDll_connect, kNetworking, kImplemented);
 
 dword_result_t NetDll_listen_entry(dword_t caller, dword_t socket_handle,
                                    int_t backlog) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    std::lock_guard<std::mutex> lock(netplay->mutex());
+    return netplay->sockets()->Listen(socket_handle, backlog);
+  }
+
   auto socket =
       kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
@@ -2150,6 +2269,12 @@ DECLARE_XAM_EXPORT1(NetDll_listen, kNetworking, kImplemented);
 dword_result_t NetDll_accept_entry(dword_t caller, dword_t socket_handle,
                                    pointer_t<XSOCKADDR_IN> addr_ptr,
                                    lpdword_t addrlen_ptr) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    std::lock_guard<std::mutex> lock(netplay->mutex());
+    return netplay->sockets()->Accept(socket_handle, addr_ptr.guest_address(),
+                                      addrlen_ptr.guest_address());
+  }
+
   auto socket =
       kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
@@ -2260,6 +2385,13 @@ int_result_t NetDll_select_entry(dword_t caller, dword_t nfds,
                                  pointer_t<x_fd_set> writefds,
                                  pointer_t<x_fd_set> exceptfds,
                                  pointer_t<X_TIMEVAL> timeout_ptr) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    std::lock_guard<std::mutex> lock(netplay->mutex());
+    return netplay->sockets()->Select(
+        nfds, readfds.guest_address(), writefds.guest_address(),
+        exceptfds.guest_address(), timeout_ptr.guest_address());
+  }
+
   if (!readfds && !writefds && !exceptfds) {
     XThread::SetLastError(X_WSA_ERROR::X_WSAEINVAL);
     return X_SOCKET_ERROR;
@@ -2354,6 +2486,12 @@ DECLARE_XAM_EXPORT1(NetDll_select, kNetworking, kImplemented);
 dword_result_t NetDll_recv_entry(dword_t caller, dword_t socket_handle,
                                  lpvoid_t buf_ptr, dword_t buf_len,
                                  dword_t flags) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    std::lock_guard<std::mutex> lock(netplay->mutex());
+    return netplay->sockets()->Recv(socket_handle, buf_ptr.guest_address(),
+                                    buf_len, flags);
+  }
+
   auto socket =
       kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
@@ -2378,6 +2516,13 @@ dword_result_t NetDll_recvfrom_entry(dword_t caller, dword_t socket_handle,
                                      dword_t flags,
                                      pointer_t<XSOCKADDR_IN> from_ptr,
                                      lpdword_t fromlen_ptr) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    std::lock_guard<std::mutex> lock(netplay->mutex());
+    return netplay->sockets()->RecvFrom(
+        socket_handle, buf_ptr.guest_address(), buf_len, flags,
+        from_ptr.guest_address(), fromlen_ptr.guest_address());
+  }
+
   auto socket =
       kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
@@ -2410,6 +2555,12 @@ DECLARE_XAM_EXPORT1(NetDll_recvfrom, kNetworking, kImplemented);
 dword_result_t NetDll_send_entry(dword_t caller, dword_t socket_handle,
                                  lpvoid_t buf_ptr, dword_t buf_len,
                                  dword_t flags) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    std::lock_guard<std::mutex> lock(netplay->mutex());
+    return netplay->sockets()->Send(socket_handle, buf_ptr.guest_address(),
+                                    buf_len, flags);
+  }
+
   auto socket =
       kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
@@ -2434,6 +2585,13 @@ dword_result_t NetDll_sendto_entry(dword_t caller, dword_t socket_handle,
                                    dword_t flags,
                                    pointer_t<XSOCKADDR_IN> to_ptr,
                                    dword_t to_len) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    std::lock_guard<std::mutex> lock(netplay->mutex());
+    return netplay->sockets()->SendTo(
+        socket_handle, buf_ptr.guest_address(), buf_len, flags,
+        to_ptr.guest_address(), to_len);
+  }
+
   auto socket =
       kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
@@ -2483,6 +2641,12 @@ DECLARE_XAM_EXPORT1(NetDll_WSAEventSelect, kNetworking, kImplemented);
 
 dword_result_t NetDll___WSAFDIsSet_entry(dword_t socket_handle,
                                          pointer_t<x_fd_set> fd_set) {
+  if (NetplayState* netplay = NetplayFor(kernel_state())) {
+    std::lock_guard<std::mutex> lock(netplay->mutex());
+    return netplay->sockets()->WsaFdIsSet(socket_handle,
+                                          fd_set.guest_address());
+  }
+
   const uint8_t max_fd_count =
       std::min((uint32_t)fd_set->fd_count, uint32_t(X_FD_SETSIZE));
   for (uint8_t i = 0; i < max_fd_count; i++) {
@@ -2495,6 +2659,10 @@ dword_result_t NetDll___WSAFDIsSet_entry(dword_t socket_handle,
 DECLARE_XAM_EXPORT1(NetDll___WSAFDIsSet, kNetworking, kImplemented);
 
 void NetDll_WSASetLastError_entry(dword_t error_code) {
+  if (NetplayFor(kernel_state())) {
+    NetplaySockets::SetLastError(error_code);
+    return;
+  }
   XThread::SetLastError(error_code);
 }
 DECLARE_XAM_EXPORT1(NetDll_WSASetLastError, kNetworking, kImplemented);

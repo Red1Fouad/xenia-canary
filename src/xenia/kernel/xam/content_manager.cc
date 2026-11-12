@@ -13,17 +13,23 @@
 #include "xenia/kernel/xam/xcontent/xcontent_package_directory.h"
 
 #include "third_party/fmt/include/fmt/format.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/netplay/netplay_state.h"
 #include "xenia/kernel/xam/user_profile.h"
 #include "xenia/kernel/xfile.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/vfs/devices/host_path_device.h"
 
 DECLARE_int32(license_mask);
+DEFINE_bool(install_bundled_content, true,
+            "Install DLC/content from beside the emulator into the content "
+            "root on startup.",
+            "Storage");
 
 namespace xe {
 namespace kernel {
@@ -36,6 +42,110 @@ ContentManager::ContentManager(KernelState* kernel_state,
     : kernel_state_(kernel_state), root_path_(root_path) {}
 
 ContentManager::~ContentManager() = default;
+
+std::filesystem::path ContentManager::FindBundledContentRoot() const {
+  if (root_path_.empty()) {
+    return {};
+  }
+
+  std::error_code ec;
+  std::vector<std::filesystem::path> candidates;
+
+  // Repo layout vs portable install.
+  const auto storage_root = root_path_.parent_path();
+  if (!storage_root.empty()) {
+    candidates.push_back(storage_root / "DLC" / "content");
+    if (!storage_root.parent_path().empty()) {
+      candidates.push_back(storage_root.parent_path() / "DLC" / "content");
+    }
+  }
+
+  const auto current_path = std::filesystem::current_path(ec);
+  if (!ec) {
+    candidates.push_back(current_path / "DLC" / "content");
+  }
+
+  auto executable_folder = xe::filesystem::GetExecutableFolder();
+  for (int depth = 0; depth < 8 && !executable_folder.empty(); ++depth) {
+    candidates.push_back(executable_folder / "DLC" / "content");
+    const auto parent = executable_folder.parent_path();
+    if (parent == executable_folder) {
+      break;
+    }
+    executable_folder = parent;
+  }
+
+  for (const auto& candidate : candidates) {
+    ec.clear();
+    if (!std::filesystem::is_directory(candidate, ec)) {
+      continue;
+    }
+
+    ec.clear();
+    const bool is_content_root =
+        std::filesystem::equivalent(candidate, root_path_, ec);
+    if (!ec && is_content_root) {
+      continue;
+    }
+
+    ec.clear();
+    const auto absolute = std::filesystem::absolute(candidate, ec);
+    return ec ? candidate : absolute;
+  }
+
+  return {};
+}
+
+void ContentManager::InstallBundledContent() {
+  if (!cvars::install_bundled_content || root_path_.empty()) {
+    return;
+  }
+
+  const auto source = FindBundledContentRoot();
+  if (source.empty()) {
+    return;
+  }
+
+  size_t installed = 0;
+  std::error_code ec;
+  for (auto it = std::filesystem::recursive_directory_iterator(
+           source, std::filesystem::directory_options::skip_permission_denied,
+           ec);
+       !ec && it != std::filesystem::recursive_directory_iterator(); ++it) {
+    const auto relative = it->path().lexically_relative(source);
+    if (relative.empty()) {
+      continue;
+    }
+
+    const auto destination = root_path_ / relative;
+    std::error_code entry_ec;
+    if (it->is_directory(entry_ec)) {
+      if (!std::filesystem::exists(destination, entry_ec)) {
+        std::filesystem::create_directories(destination, entry_ec);
+        if (!entry_ec) {
+          ++installed;
+        }
+      }
+    } else if (it->is_regular_file(entry_ec)) {
+      if (!std::filesystem::exists(destination, entry_ec)) {
+        std::filesystem::create_directories(destination.parent_path(),
+                                            entry_ec);
+        if (!entry_ec) {
+          std::filesystem::copy_file(
+              *it, destination, std::filesystem::copy_options::none, entry_ec);
+          if (!entry_ec) {
+            ++installed;
+          }
+        }
+      }
+    }
+  }
+
+  if (installed) {
+    XELOGI("Content: installed {} entries from bundled content {}", installed,
+           xe::path_to_utf8(source));
+  }
+}
 
 std::string ContentManager::GeneratePackageDevicePath(
     [[maybe_unused]] const std::filesystem::path& root_path) {
@@ -479,6 +589,12 @@ X_RESULT ContentManager::OpenContent(const std::string_view root_name,
   content_license = package->GetContentMetadata().license_mask;
   if (static_cast<uint32_t>(cvars::license_mask) > 1) {
     content_license |= cvars::license_mask;
+  }
+
+  // Netplay: every license bit while active.
+  NetplayState* netplay = kernel_state_->netplay();
+  if (netplay && netplay->IsActive()) {
+    content_license = 0xFFFFFFFF;
   }
 
   // Check for SPA file in package. Check it only for DLCs

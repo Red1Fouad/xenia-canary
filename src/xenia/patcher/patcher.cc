@@ -8,11 +8,29 @@
  */
 #include <cstring>
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/memory.h"
 #include "xenia/patcher/patcher.h"
+
+DEFINE_bool(mm10_dlc_unlock, true,
+            "Make the Mega Man 10 DLC (Forte, Endless Mode and Special Stages) "
+            "available without an external patch.",
+            "Game");
 
 namespace xe {
 namespace patcher {
+
+namespace {
+
+constexpr uint32_t kMegaMan10TitleId = 0x584109EE;
+
+// 8209BD10: DLC license mask. Caller 820D9D40 tests bit 0x2; return 2.
+constexpr uint32_t kMegaMan10DlcCheck = 0x8209BD10;
+constexpr uint32_t kMegaMan10DlcCheckReturn = 0x38600002;
+constexpr uint32_t kMegaMan10DlcCheckBlr = 0x4E800020;
+
+}  // namespace
 
 Patcher::Patcher(const std::filesystem::path patches_root) {
   is_any_patch_applied_ = false;
@@ -33,6 +51,32 @@ void Patcher::ApplyPatchesForTitle(Memory* memory, const uint32_t title_id,
       ApplyPatch(memory, &patchEntry);
     }
   }
+}
+
+void Patcher::ApplyTitleFixes(Memory* memory, const uint32_t title_id) {
+  if (title_id != kMegaMan10TitleId || !cvars::mm10_dlc_unlock) {
+    return;
+  }
+
+  PatchInfoEntry patch{};
+  patch.id = 0;
+  patch.patch_name = "Mega Man 10 DLC unlock";
+  patch.patch_desc =
+      "Forces the DLC entitlement check to report Forte, Endless Mode and "
+      "the Special Stages as owned.";
+  patch.patch_author = "Xenia Canary Netplay";
+  patch.is_enabled = true;
+  patch.patch_data.emplace_back(
+      kMegaMan10DlcCheck,
+      PatchDataValue(sizeof(uint32_t),
+                     xe::byte_swap(kMegaMan10DlcCheckReturn)));
+  patch.patch_data.emplace_back(
+      kMegaMan10DlcCheck + 4u,
+      PatchDataValue(sizeof(uint32_t), xe::byte_swap(kMegaMan10DlcCheckBlr)));
+
+  XELOGI("Patcher: applying built-in patch for: MEGA MAN 10 ({:08X}) - {}",
+         title_id, patch.patch_name);
+  ApplyPatch(memory, &patch);
 }
 
 void Patcher::ApplyPatch(Memory* memory, const PatchInfoEntry* patch) {

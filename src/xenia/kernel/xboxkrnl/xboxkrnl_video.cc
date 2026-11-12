@@ -13,6 +13,8 @@
 #include "xenia/emulator.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/netplay/netplay_game.h"
+#include "xenia/kernel/netplay/netplay_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_rtl.h"
@@ -545,6 +547,13 @@ void VdSwap_entry(
   // Fill the rest of the buffer with NOP packets.
   for (uint32_t i = offset; i < 64; i++) {
     dwords[i] = xenos::MakePacketType2();
+  }
+
+  // A shown frame just ended, on the game's own thread: the same point the
+  // reference hashes the two players' state from.
+  NetplayState* netplay = kernel_state()->netplay();
+  if (netplay && netplay->IsActive()) {
+    netplay->game()->StateCheckTick();
   }
 }
 DECLARE_XBOXKRNL_EXPORT3(VdSwap, kVideo, kImplemented, kHighFrequency,

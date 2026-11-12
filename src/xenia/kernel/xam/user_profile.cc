@@ -12,6 +12,8 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/emulator.h"
 #include "xenia/kernel/XLiveAPI.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/netplay/netplay_state.h"
 #include "xenia/kernel/util/friends_util.h"
 #include "xenia/kernel/util/presence_string_builder.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -57,7 +59,13 @@ bool UserProfile::IsSignedInToLive() const {
 }
 
 X_USER_SIGNIN_STATE UserProfile::signin_state() const {
-  return IsLiveEnabled() && cvars::network_mode == NETWORK_MODE::XBOXLIVE
+  // Netplay acts as Live regardless of network mode.
+  const bool netplay_active =
+      kernel_state() && kernel_state()->netplay() &&
+      kernel_state()->netplay()->IsActive();
+
+  return IsLiveEnabled() &&
+                 (netplay_active || cvars::network_mode == NETWORK_MODE::XBOXLIVE)
              ? X_USER_SIGNIN_STATE::SignedInToLive
              : X_USER_SIGNIN_STATE::SignedInLocally;
 }

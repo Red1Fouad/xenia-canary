@@ -32,6 +32,11 @@ class XInputInputDriver final : public InputDriver {
   virtual InputType GetInputType() const override;
 
  private:
+  // Maps a guest slot to the physical XInput index.
+  int32_t PhysicalUserIndex(uint32_t user_index) const;
+  // First physical pad Windows reports as connected.
+  int32_t FirstConnectedPhysicalPad() const;
+
   void* module_;
   void* XInputGetCapabilities_;
   void* XInputGetState_;

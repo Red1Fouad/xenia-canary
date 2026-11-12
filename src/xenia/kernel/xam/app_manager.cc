@@ -10,6 +10,8 @@
 #include "xenia/kernel/xam/app_manager.h"
 
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/netplay/netplay_state.h"
+#include "xenia/kernel/netplay/session_app.h"
 #include "xenia/kernel/xam/apps/messenger_app.h"
 #include "xenia/kernel/xam/apps/xam_app.h"
 #include "xenia/kernel/xam/apps/xgi_app.h"
@@ -31,36 +33,73 @@ void AppManager::RegisterApps(KernelState* kernel_state, AppManager* manager) {
   manager->RegisterApp(std::make_unique<apps::XgiApp>(kernel_state));
   manager->RegisterApp(std::make_unique<apps::XLiveBaseApp>(kernel_state));
   manager->RegisterApp(std::make_unique<apps::XamApp>(kernel_state));
+
+  // Session service beside XGI.
+  auto session_app = std::make_unique<apps::SessionApp>(kernel_state);
+  manager->SetNetplayApp(session_app.get());
+  manager->RegisterApp(std::move(session_app));
 }
 
 void AppManager::RegisterApp(std::unique_ptr<App> app) {
-  assert_zero(app_lookup_.count(app->app_id()));
-  app_lookup_.insert({app->app_id(), app.get()});
+  App* raw_app = app.get();
+  if (app_lookup_.contains(raw_app->app_id())) {
+    // Shared 0xFB: ResolveApp picks per message.
+    assert_true(raw_app == netplay_app_);
+    apps_.push_back(std::move(app));
+    return;
+  }
+  app_lookup_.insert({raw_app->app_id(), raw_app});
   apps_.push_back(std::move(app));
+}
+
+App* AppManager::ResolveApp(uint32_t app_id, uint32_t message) const {
+  if (app_id == 0xFB && netplay_app_ && netplay_app_->kernel_state_ &&
+      netplay_app_->kernel_state_->netplay() &&
+      netplay_app_->kernel_state_->netplay()->IsActive() &&
+      netplay_app_->HandlesMessage(message)) {
+    return netplay_app_;
+  }
+
+  const auto it = app_lookup_.find(app_id);
+  return it == app_lookup_.end() ? nullptr : it->second;
 }
 
 X_HRESULT AppManager::DispatchMessageSync(uint32_t app_id, uint32_t message,
                                           uint32_t buffer_ptr,
                                           uint32_t buffer_length) {
-  const auto& it = app_lookup_.find(app_id);
-  if (it == app_lookup_.end()) {
+  App* app = ResolveApp(app_id, message);
+  if (!app) {
     return X_E_NOTFOUND;
   }
 
-  return it->second->ExecuteDispatchMessage(message, buffer_ptr, buffer_length,
-                                            nullptr);
+  return app->ExecuteDispatchMessage(message, buffer_ptr, buffer_length,
+                                     nullptr);
 }
 
 X_HRESULT AppManager::DispatchMessageAsync(uint32_t app_id, uint32_t message,
                                            uint32_t buffer_ptr,
                                            uint32_t buffer_length,
                                            uint32_t overlapped_ptr) {
-  const auto& it = app_lookup_.find(app_id);
-  if (it == app_lookup_.end()) {
+  App* app = ResolveApp(app_id, message);
+  if (!app) {
     return X_E_NOTFOUND;
   }
 
-  Memory* memory = it->second->kernel_state_->memory();
+  Memory* memory = app->kernel_state_->memory();
+
+  if (overlapped_ptr && app->CompletesOverlappedItself(message)) {
+    // Copied now, completed later.
+    app->kernel_state_->MarkOverlappedPending(overlapped_ptr);
+    uint32_t extended_error = 0;
+    const X_HRESULT result = app->ExecuteDispatchMessageWithOverlapped(
+        message, buffer_ptr, buffer_length, overlapped_ptr, &extended_error);
+    if (result != X_ERROR_SUCCESS) {
+      // Refused: release the overlapped.
+      app->kernel_state_->CompleteDeferredOverlapped(overlapped_ptr, result);
+      return result;
+    }
+    return X_ERROR_IO_PENDING;
+  }
 
   auto buffer_in = memory->SystemHeapAlloc(buffer_length);
 
@@ -71,15 +110,15 @@ X_HRESULT AppManager::DispatchMessageAsync(uint32_t app_id, uint32_t message,
 
   auto post = [memory, buffer_in]() { memory->SystemHeapFree(buffer_in); };
 
-  auto run = [it, message, buffer_in, buffer_length](
+  auto run = [app, message, buffer_in, buffer_length](
                  uint32_t& extended_error, uint32_t& length) -> X_RESULT {
-    return it->second->ExecuteDispatchMessage(message, buffer_in, buffer_length,
-                                              &extended_error);
+    return app->ExecuteDispatchMessage(message, buffer_in, buffer_length,
+                                       &extended_error);
   };
 
   if (overlapped_ptr) {
-    it->second->kernel_state_->CompleteOverlappedDeferredEx(run, overlapped_ptr,
-                                                            nullptr, post);
+    app->kernel_state_->CompleteOverlappedDeferredEx(run, overlapped_ptr,
+                                                     nullptr, post);
     return X_ERROR_IO_PENDING;
   };
 

@@ -9,6 +9,9 @@
 
 #include "xenia/hid/keyboard/keyboard_input_driver.h"
 
+#include <cstdio>
+
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/hid/hid_flags.h"
 #include "xenia/hid/input_system.h"
@@ -24,11 +27,13 @@
 #include "keyboard_binding_table.inc"
 #undef XE_HID_KEYBOARD_BINDING
 
-DEFINE_int32(keyboard_mode, 0,
+DEFINE_int32(keyboard_mode, 1,
              "Allows user do specify keyboard working mode. Possible values: 0 "
              "- Disabled, 1 - Enabled, 2 - Passthrough. Passthrough requires "
              "controller being connected!",
              "HID");
+// Config migration: old default was Disabled.
+UPDATE_from_int32(keyboard_mode, 2026, 11, 11, 0, 0);
 
 DEFINE_int32(
     keyboard_user_index, 0,
@@ -39,6 +44,100 @@ DEFINE_int32(
 namespace xe {
 namespace hid {
 namespace keyboard {
+
+namespace {
+
+// Current driver, if any.
+KeyboardInputDriver* current_driver_ = nullptr;
+
+template <typename T>
+cvar::ConfigVar<T>* FindConfigVar(std::string_view name) {
+  if (!cvar::ConfigVars) {
+    return nullptr;
+  }
+  auto it = cvar::ConfigVars->find(std::string(name));
+  if (it == cvar::ConfigVars->end()) {
+    return nullptr;
+  }
+  return dynamic_cast<cvar::ConfigVar<T>*>(it->second);
+}
+
+}  // namespace
+
+std::vector<KeyboardBindingInfo> KeyboardBindings() {
+  std::vector<KeyboardBindingInfo> bindings;
+#define XE_HID_KEYBOARD_BINDING(button, description, cvar_name,    \
+                                cvar_default_value)                \
+  bindings.push_back({#cvar_name, description, cvar_default_value, \
+                      KeyboardBindingValue(#cvar_name)});
+#include "keyboard_binding_table.inc"
+#undef XE_HID_KEYBOARD_BINDING
+  return bindings;
+}
+
+std::string KeyboardBindingValue(std::string_view name) {
+  auto* config_var = FindConfigVar<std::string>(name);
+  return config_var ? config_var->GetTypedConfigValue() : std::string();
+}
+
+bool SetKeyboardBindingValue(std::string_view name, std::string_view value) {
+  auto* config_var = FindConfigVar<std::string>(name);
+  if (!config_var) {
+    return false;
+  }
+  config_var->OverrideConfigValue(std::string(value));
+  ReloadKeyboardBindings();
+  return true;
+}
+
+bool ResetKeyboardBindingValue(std::string_view name) {
+#define XE_HID_KEYBOARD_BINDING(button, description, cvar_name,     \
+                                cvar_default_value)                 \
+  if (name == #cvar_name) {                                         \
+    return SetKeyboardBindingValue(#cvar_name, cvar_default_value); \
+  }
+#include "keyboard_binding_table.inc"
+#undef XE_HID_KEYBOARD_BINDING
+  return false;
+}
+
+std::string KeyboardBindingToken(ui::VirtualKey key) {
+  const uint16_t virtual_key = static_cast<uint16_t>(key);
+  if (virtual_key == 0) {
+    return std::string();
+  }
+  if ((virtual_key >= 'A' && virtual_key <= 'Z') ||
+      (virtual_key >= '0' && virtual_key <= '9')) {
+    return std::string(1, static_cast<char>(virtual_key));
+  }
+  char token[8];
+  std::snprintf(token, sizeof(token), "0x%02X", virtual_key);
+  return token;
+}
+
+void ReloadKeyboardBindings() {
+  if (current_driver_) {
+    current_driver_->ReloadBindings();
+  }
+}
+
+int KeyboardModeValue() { return cvars::keyboard_mode; }
+
+void SetKeyboardModeValue(int mode) {
+  auto* config_var = FindConfigVar<int32_t>("keyboard_mode");
+  if (config_var) {
+    config_var->OverrideConfigValue(mode);
+  }
+}
+
+int KeyboardUserIndexValue() { return cvars::keyboard_user_index; }
+
+void SetKeyboardUserIndexValue(int index) {
+  auto* config_var = FindConfigVar<int32_t>("keyboard_user_index");
+  if (config_var) {
+    config_var->OverrideConfigValue(index);
+  }
+}
 
 uint8_t KeyboardInputDriver::VirtualKeyToHIDUsage(uint16_t vk) const {
   // Letters: contiguous in both VK and HID space
@@ -222,18 +321,27 @@ void KeyboardInputDriver::ParseKeyBinding(
 KeyboardInputDriver::KeyboardInputDriver(xe::ui::Window* window,
                                          size_t window_z_order)
     : InputDriver(window, window_z_order), window_input_listener_(*this) {
+  current_driver_ = this;
+  ReloadBindings();
+  window->AddInputListener(&window_input_listener_, window_z_order);
+}
+
+KeyboardInputDriver::~KeyboardInputDriver() {
+  if (current_driver_ == this) {
+    current_driver_ = nullptr;
+  }
+  window()->RemoveInputListener(&window_input_listener_);
+}
+
+void KeyboardInputDriver::ReloadBindings() {
+  auto global_lock = global_critical_region_.Acquire();
+  key_bindings_.clear();
 #define XE_HID_KEYBOARD_BINDING(button, description, cvar_name,        \
                                 cvar_default_value)                    \
   ParseKeyBinding(xe::ui::VirtualKey::kXInputPad##button, description, \
                   cvars::cvar_name);
 #include "keyboard_binding_table.inc"
 #undef XE_HID_KEYBOARD_BINDING
-
-  window->AddInputListener(&window_input_listener_, window_z_order);
-}
-
-KeyboardInputDriver::~KeyboardInputDriver() {
-  window()->RemoveInputListener(&window_input_listener_);
 }
 
 X_STATUS KeyboardInputDriver::Setup() { return X_STATUS_SUCCESS; }
@@ -281,6 +389,8 @@ X_RESULT KeyboardInputDriver::GetState(uint32_t user_index,
   int16_t thumb_ly = 0;
   int16_t thumb_rx = 0;
   int16_t thumb_ry = 0;
+
+  auto global_lock = global_critical_region_.Acquire();
 
   if (window()->HasFocus()) {
     for (const KeyBinding& b : key_bindings_) {

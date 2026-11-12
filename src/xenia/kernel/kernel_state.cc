@@ -15,6 +15,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
 #include "xenia/hid/input_system.h"
+#include "xenia/kernel/netplay/netplay_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_memory.h"
@@ -63,6 +64,7 @@ KernelState::KernelState(Emulator* emulator)
   shared_kernel_state_ = this;
   processor_ = emulator->processor();
   file_system_ = emulator->file_system();
+  netplay_ = std::make_unique<NetplayState>(this);
   xam_state_ = std::make_unique<xam::XamState>(emulator, this);
   smc_ = std::make_unique<SystemManagementController>();
   xconfig_ =
@@ -93,6 +95,9 @@ KernelState::~KernelState() {
   executable_module_.reset();
   user_modules_.clear();
   kernel_modules_.clear();
+
+  // Stop worker before object table teardown.
+  netplay_.reset();
 
   // Delete all objects.
   object_table_.Reset();
@@ -484,6 +489,9 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
   }
   executable_module_ = std::move(module);
   if (!executable_module_) {
+    if (netplay_) {
+      netplay_->Shutdown();
+    }
     return;
   }
 
@@ -557,6 +565,11 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
 
   // Initialize file I/O hooks for XMP volume title-specific patches.
   InitXmpVolumePatch();
+
+  // Module known: netplay can check title.
+  if (netplay_) {
+    netplay_->Refresh();
+  }
 
   // Spin up deferred dispatch worker.
   // TODO(benvanik): move someplace more appropriate (out of ctor, but around
@@ -686,6 +699,7 @@ X_RESULT KernelState::FinishLoadingUserModule(
   module->Dump();
   emulator_->patcher()->ApplyPatchesForTitle(memory_, module->title_id(),
                                              module->hash());
+  emulator_->patcher()->ApplyTitleFixes(memory_, module->title_id());
   emulator_->on_patch_apply();
   if (module->xex_module()) {
     module->xex_module()->Precompile();
@@ -1165,6 +1179,46 @@ void KernelState::CompleteOverlappedEx(uint32_t overlapped_ptr, X_RESULT result,
   }
 
   SetOverlappedCompletion(overlapped_ptr, result, extended_error, length);
+}
+
+void KernelState::MarkOverlappedPending(uint32_t overlapped_ptr) {
+  if (!overlapped_ptr) {
+    return;
+  }
+
+  auto ptr = memory()->TranslateVirtual(overlapped_ptr);
+  if (!ptr) {
+    return;
+  }
+
+  auto global_lock = global_critical_region_.Acquire();
+  netplay_pending_overlaps_.insert(overlapped_ptr);
+
+  XOverlappedSetResult(ptr, X_ERROR_IO_PENDING);
+  XOverlappedSetContext(ptr, XThread::GetCurrentThreadHandle());
+
+  // Pending: do not signal event.
+  X_HANDLE event_handle = XOverlappedGetEvent(ptr);
+  if (event_handle) {
+    auto ev = object_table()->LookupObject<XObject>(event_handle);
+    if (ev && ev->type() == XObject::Type::Event) {
+      ev.get<XEvent>()->Reset();
+    }
+  }
+}
+
+void KernelState::CompleteDeferredOverlapped(uint32_t overlapped_ptr,
+                                             X_RESULT result) {
+  if (!overlapped_ptr) {
+    return;
+  }
+
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    netplay_pending_overlaps_.erase(overlapped_ptr);
+  }
+
+  CompleteOverlappedEx(overlapped_ptr, result, result, 0);
 }
 
 void KernelState::SetOverlappedCompletion(uint32_t overlapped_ptr,

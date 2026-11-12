@@ -28,6 +28,7 @@ XamState::XamState(Emulator* emulator, KernelState* kernel_state)
   }
   content_manager_ =
       std::make_unique<ContentManager>(kernel_state, content_root);
+  content_manager_->InstallBundledContent();
 
   user_tracker_ = std::make_unique<UserTracker>();
   profile_manager_ = std::make_unique<ProfileManager>(

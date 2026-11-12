@@ -116,3 +116,27 @@ node_modules/.bin/
 /cache0
 /devkit
 recent.toml
+
+# ==============================================================================
+# Local game data / profiles (never commit)
+# ==============================================================================
+
+/game/
+/xenia_data/
+/xenia_data_*/
+/DLC/
+/*.xex
+/*.iso
+/*.xcp
+.test_host_pid
+.test_join_pid
+/*.out
+/*.err
+/build.bat
+/build.ps1
+
+# ==============================================================================
+# Local notes (kept out of the repo)
+# ==============================================================================
+
+/otherDoc/

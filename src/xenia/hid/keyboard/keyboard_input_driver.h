@@ -11,6 +11,9 @@
 #define XENIA_HID_KEYBOARD_KEYBOARD_INPUT_DRIVER_H_
 
 #include <queue>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "xenia/base/mutex.h"
 #include "xenia/hid/input_driver.h"
@@ -22,6 +25,42 @@ namespace keyboard {
 
 enum class KeyboardMode { Disabled, Enabled, Passthrough };
 
+// Keybinding row for host UI.
+struct KeyboardBindingInfo {
+  // Cvar name, e.g. "keybind_a".
+  std::string name;
+  // Controller input name, e.g. "A".
+  std::string description;
+  // Config default, e.g. "0xBA".
+  std::string default_value;
+  // Current value, e.g. "0xBA" or "^A".
+  std::string value;
+};
+
+// Full binding table in button order.
+std::vector<KeyboardBindingInfo> KeyboardBindings();
+
+// Current binding value ("" if missing).
+std::string KeyboardBindingValue(std::string_view name);
+
+// Set binding and apply live; false if cvar missing. Not saved.
+bool SetKeyboardBindingValue(std::string_view name, std::string_view value);
+
+// Restore built-in default.
+bool ResetKeyboardBindingValue(std::string_view name);
+
+// Virtual key -> cvar token ("A".."Z"/"0".."9" or "0xHH"; "" for 0).
+std::string KeyboardBindingToken(ui::VirtualKey key);
+
+// Mode/slot via config vars.
+int KeyboardModeValue();
+void SetKeyboardModeValue(int mode);
+int KeyboardUserIndexValue();
+void SetKeyboardUserIndexValue(int index);
+
+// Re-read bindings into live driver.
+void ReloadKeyboardBindings();
+
 class KeyboardInputDriver final : public InputDriver {
  public:
   explicit KeyboardInputDriver(xe::ui::Window* window, size_t window_z_order);
@@ -32,6 +71,9 @@ class KeyboardInputDriver final : public InputDriver {
   bool IsPassthroughEnabled();
 
   bool IsKeyboardForUserEnabled(uint32_t user_index);
+
+  // Rebuild binding table; safe during polling.
+  void ReloadBindings();
 
   X_STATUS Setup() override;
 

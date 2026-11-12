@@ -35,6 +35,8 @@ namespace app {
 
 class ConsoleSettingsDialog;
 class ContentListDialog;
+class KeyboardSettingsDialog;
+class NetplayLinkDialog;
 
 struct RecentTitleEntry {
   std::string title_name;
@@ -112,11 +114,13 @@ class EmulatorWindow {
   void ToggleXMPConfigDialog();
   void ToggleConsoleSettingsDialog();
   void ToggleContentListDialog();
+  void ToggleKeyboardSettingsDialog();
   void ToggleFriendsDialog();
   void ToggleUpdaterDialog();
   void ToggleCompletionDialog();
   void ToggleNetplaySettingsDialog();
   void ToggleNetplayStatusDialog();
+  void ToggleNetplayLinkDialog();
 
   void SetHotkeysState(bool enabled) { disable_hotkeys_ = !enabled; }
 
@@ -348,6 +352,7 @@ class EmulatorWindow {
   std::unique_ptr<DisplayConfigDialog> display_config_dialog_;
   std::unique_ptr<ConsoleSettingsDialog> console_settings_dialog_;
   std::unique_ptr<ContentListDialog> content_list_dialog_;
+  std::unique_ptr<KeyboardSettingsDialog> keyboard_settings_dialog_;
   // Storing pointers and toggling dialog state is useful for broadcasting
   // messages back to guest.
   std::unique_ptr<ProfileConfigDialog> profile_config_dialog_;
@@ -365,6 +370,8 @@ class EmulatorWindow {
   std::unique_ptr<NetplaySettingsDialog> netplay_settings_dialog_;
 
   std::unique_ptr<NetplayStatusDialog> netplay_status_dialog_;
+
+  std::unique_ptr<NetplayLinkDialog> netplay_link_dialog_;
 
   std::vector<RecentTitleEntry> recently_launched_titles_;
 };

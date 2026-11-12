@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <functional>
 #include <list>
+#include <set>
 #include <vector>
 
 #include "xenia/base/bit_map.h"
@@ -48,6 +49,8 @@ class Processor;
 
 namespace xe {
 namespace kernel {
+
+class NetplayState;
 
 constexpr fourcc_t kKernelSaveSignature = make_fourcc("KRNL");
 
@@ -198,6 +201,8 @@ class KernelState {
 
   xam::XamState* xam_state() const { return xam_state_.get(); }
 
+  NetplayState* netplay() const { return netplay_.get(); }
+
   SystemManagementController* smc() const { return smc_.get(); }
 
   NUIController* nui() const { return nui_.get(); }
@@ -305,6 +310,10 @@ class KernelState {
   void CompleteOverlappedEx(uint32_t overlapped_ptr, X_RESULT result,
                             uint32_t extended_error, uint32_t length);
 
+  // Netplay-owned overlapped: pending now, completed by link worker.
+  void MarkOverlappedPending(uint32_t overlapped_ptr);
+  void CompleteDeferredOverlapped(uint32_t overlapped_ptr, X_RESULT result);
+
   void CompleteOverlappedImmediate(uint32_t overlapped_ptr, X_RESULT result);
   void CompleteOverlappedImmediateEx(uint32_t overlapped_ptr, X_RESULT result,
                                      uint32_t extended_error, uint32_t length);
@@ -379,6 +388,7 @@ class KernelState {
   Memory* memory_;
   cpu::Processor* processor_;
   vfs::VirtualFileSystem* file_system_;
+  std::unique_ptr<NetplayState> netplay_;
   std::unique_ptr<xam::XamState> xam_state_;
   std::unique_ptr<SystemManagementController> smc_;
   std::unique_ptr<XmpVolumePatch> xmp_volume_patch_;
@@ -421,6 +431,7 @@ class KernelState {
 
   std::unordered_map<uint32_t, DeferredOverlappedRequest>
       deferred_overlapped_requests_;
+  std::set<uint32_t> netplay_pending_overlaps_;
   uint64_t next_deferred_overlapped_request_id_ = 0;
   std::condition_variable_any deferred_overlapped_cond_;
 

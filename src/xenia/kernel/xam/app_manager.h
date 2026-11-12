@@ -37,6 +37,26 @@ class App {
                                            uint32_t buffer_length,
                                            uint32_t* extended_error) = 0;
 
+  // App completes the overlapped itself.
+  virtual X_HRESULT ExecuteDispatchMessageWithOverlapped(
+      uint32_t message, uint32_t buffer_ptr, uint32_t buffer_length,
+      uint32_t overlapped_ptr, uint32_t* extended_error) {
+    (void)overlapped_ptr;
+    return ExecuteDispatchMessage(message, buffer_ptr, buffer_length,
+                                  extended_error);
+  }
+
+  // App owns and completes the overlapped (possibly later).
+  virtual bool CompletesOverlappedItself(uint32_t message) const {
+    return false;
+  }
+
+  // App claims this message; used for shared app IDs.
+  virtual bool HandlesMessage(uint32_t message) const {
+    (void)message;
+    return true;
+  }
+
   virtual ~App() = default;
   KernelState* kernel_state_;
 
@@ -53,6 +73,9 @@ class AppManager {
 
   void RegisterApp(std::unique_ptr<App> app);
 
+  // Session service shares 0xFB with XGI; picked per message in ResolveApp.
+  void SetNetplayApp(App* app) { netplay_app_ = app; }
+
   bool HasApp(uint32_t app_id) const { return app_lookup_.contains(app_id); }
 
   X_HRESULT DispatchMessageSync(uint32_t app_id, uint32_t message,
@@ -62,8 +85,11 @@ class AppManager {
                                  uint32_t overlapped_ptr);
 
  private:
+  App* ResolveApp(uint32_t app_id, uint32_t message) const;
+
   std::vector<std::unique_ptr<App>> apps_;
   std::unordered_map<uint32_t, App*> app_lookup_;
+  App* netplay_app_ = nullptr;
 };
 
 }  // namespace xam

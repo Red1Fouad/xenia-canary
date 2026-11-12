@@ -23,6 +23,7 @@ class Patcher {
   void ApplyPatch(Memory* memory, const PatchInfoEntry* patch);
   void ApplyPatchesForTitle(Memory* memory, const uint32_t title_id,
                             const std::optional<uint64_t> hash);
+  void ApplyTitleFixes(Memory* memory, const uint32_t title_id);
 
   bool IsAnyPatchApplied() { return is_any_patch_applied_; }
 

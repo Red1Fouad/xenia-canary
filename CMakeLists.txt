@@ -141,7 +141,7 @@ if(MSVC)
 
   # Global Windows system libraries
   link_libraries(
-    ntdll wsock32 ws2_32 xinput comctl32 shcore shlwapi dxguid bcrypt
+    ntdll wsock32 ws2_32 iphlpapi xinput comctl32 shcore shlwapi dxguid bcrypt
   )
   # Windows manifest for executables is handled per-target
 

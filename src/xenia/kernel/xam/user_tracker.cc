@@ -20,6 +20,7 @@
 #include "xenia/base/threading.h"
 #include "xenia/kernel/XLiveAPI.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/netplay/netplay_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/user_data.h"
 #include "xenia/kernel/xam/user_property.h"
@@ -1455,6 +1456,12 @@ void UserTracker::RefreshTitleSummary(uint64_t xuid, uint32_t title_id) {
 }
 
 uint32_t UserTracker::GetLogonState() const {
+  // Netplay counts as connected.
+  if (kernel_state() && kernel_state()->netplay() &&
+      kernel_state()->netplay()->IsActive()) {
+    return X_ONLINE_S_LOGON_CONNECTION_ESTABLISHED;
+  }
+
   const NETWORK_MODE network_state =
       static_cast<NETWORK_MODE>(cvars::network_mode);
 
