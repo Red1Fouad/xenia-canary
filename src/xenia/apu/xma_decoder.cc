@@ -9,6 +9,8 @@
 
 #include "xenia/apu/xma_decoder.h"
 
+#include "xenia/apu/custom_music.h"
+#include "xenia/apu/music_log.h"
 #include "xenia/apu/xma_context.h"
 #include "xenia/apu/xma_context_fake.h"
 #include "xenia/apu/xma_context_master.h"
@@ -130,6 +132,11 @@ void av_log_callback(void* avcl, int level, const char* fmt, va_list va) {
 X_STATUS XmaDecoder::Setup(kernel::KernelState* kernel_state) {
   // Setup ffmpeg logging callback
   av_log_set_callback(av_log_callback);
+
+  // New title, drop old wave bank addresses.
+  ResetMusicLog();
+  // Rescan custom_music/ so edits are picked up on the next boot.
+  InitializeCustomMusic();
 
   // Let the processor know we want register access callbacks.
   memory_->AddVirtualMappedRange(
@@ -341,6 +348,22 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
       const uint32_t context_id = base_context_id + std::countr_zero(value);
       auto& context = *contexts_[context_id];
       context.Enable();
+      {
+        // Queued input buffers; a music bank address names the track. Runs even
+        // when logging is off because custom music needs the same mapping.
+        XMA_CONTEXT_DATA context_data(
+            memory_->TranslateVirtual(context.guest_ptr()));
+        const int sample_rate = kIdToSampleRate[context_data.sample_rate & 3];
+        for (uint8_t buffer = 0; buffer < 2; ++buffer) {
+          if (context_data.IsInputBufferValid(buffer) &&
+              context_data.GetInputBufferPacketCount(buffer)) {
+            LogXmaInputBuffer(context_id,
+                              context_data.GetInputBufferAddress(buffer),
+                              context_data.GetInputBufferPacketCount(buffer),
+                              sample_rate, context_data.is_stereo != 0);
+          }
+        }
+      }
       if (!cvars::use_dedicated_xma_thread) {
         context.Work();
       }
@@ -367,6 +390,7 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
       const uint32_t context_id = base_context_id + std::countr_zero(value);
       auto& context = *contexts_[context_id];
       context.Disable();
+      LogXmaContextStopped(context_id);
       // Ensure the worker isn't mid-processing this context.
       context.Block(false);
       value &= value - 1;

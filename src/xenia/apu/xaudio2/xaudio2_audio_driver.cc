@@ -9,8 +9,12 @@
 
 #include "xenia/apu/xaudio2/xaudio2_audio_driver.h"
 
+#include <cmath>
+#include <cstring>
+
 #include "xenia/apu/apu_flags.h"
 #include "xenia/apu/conversion.h"
+#include "xenia/apu/custom_music.h"
 #include "xenia/apu/xaudio2/xaudio2_api.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
@@ -127,6 +131,7 @@ bool XAudio2AudioDriver::Initialize() {
     mta_thread_.join();
     return false;
   }
+  SetCustomMusicOutputAvailable(true);
   return true;
 }
 
@@ -224,6 +229,34 @@ void XAudio2AudioDriver::SubmitFrame(float* frame) {
     memcpy(output_frame, frame, frame_size_);
   }
 
+  // Diagnostics: report when this render client starts / stops producing
+  // audio, so the music client can be told apart from the effects client.
+  if (client_index() >= 0) {
+    const size_t total = size_t(frame_channels_) * channel_samples_;
+    double sum = 0.0;
+    for (size_t i = 0; i < total; ++i) {
+      sum += double(output_frame[i]) * double(output_frame[i]);
+    }
+    const double rms = std::sqrt(sum / double(total));
+    const bool active = rms > 0.002;
+    if (active != level_active_) {
+      level_active_ = active;
+      XELOGI("audio: client {} {}", client_index(), active ? "active" : "silent");
+    }
+  }
+
+  // Custom music replacement (Mega Man 10). The client that carries the
+  // game's music is silenced, then the custom track is mixed into the frame.
+  // Only one render client gets the track - mixing it into every client
+  // advances the cursor multiple times per period and speeds the track up.
+  if (ShouldMuteAudioClient(client_index())) {
+    memset(output_frame, 0, frame_size_);
+  }
+  if (client_index() <= 0) {
+    MixCustomMusic(output_frame, frame_channels_, channel_samples_,
+                   frame_frequency_);
+  }
+
   api::XAUDIO2_BUFFER buffer;
   buffer.Flags = 0;
   buffer.pAudioData = reinterpret_cast<BYTE*>(output_frame);
@@ -285,6 +318,7 @@ void XAudio2AudioDriver::SetVolume(float volume) {
 }
 
 void XAudio2AudioDriver::Shutdown() {
+  SetCustomMusicOutputAvailable(false);
   // XAudio2 lifecycle is managed by the MTA thread.
   if (mta_thread_.joinable()) {
     {

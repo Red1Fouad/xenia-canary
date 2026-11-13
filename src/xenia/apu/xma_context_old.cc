@@ -11,6 +11,7 @@
 
 #include <cstring>
 
+#include "xenia/apu/music_log.h"
 #include "xenia/apu/xma_decoder.h"
 #include "xenia/apu/xma_helpers.h"
 #include "xenia/base/bit_stream.h"
@@ -655,6 +656,9 @@ void XmaContextOld::Decode(XMA_CONTEXT_DATA* data) {
       // decoded_consumed_samples_ += kSamplesPerFrame;
 
       auto byte_count = kBytesPerFrameChannel << data->is_stereo;
+      if (ShouldMuteMusicContext(id())) {
+        std::memset(raw_frame_.data(), 0, byte_count);
+      }
       assert_true(output_remaining_bytes >= byte_count);
       output_rb.Write(raw_frame_.data(), byte_count);
       output_remaining_bytes -= byte_count;

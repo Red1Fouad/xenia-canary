@@ -135,6 +135,11 @@ recent.toml
 /build.bat
 /build.ps1
 
+# Launcher state (name and last host address typed at launch)
+mm10_coop_name.txt
+mm10_coop_host.txt
+/mm10_coop.log
+
 # ==============================================================================
 # Local notes (kept out of the repo)
 # ==============================================================================

@@ -254,6 +254,7 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg,
     return result;
   }
   assert_not_null(driver);
+  driver->set_client_index(static_cast<int>(index));
   XELOGI(
       "AudioSystem::RegisterClient: driver created for index={}, driver={:p}",
       index, (void*)driver);

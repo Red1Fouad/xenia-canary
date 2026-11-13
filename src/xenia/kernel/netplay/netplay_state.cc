@@ -16,6 +16,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
+#include "xenia/base/string_util.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/netplay/netplay_game.h"
 #include "xenia/kernel/netplay/netplay_sockets.h"
@@ -67,6 +68,10 @@ DEFINE_uint32(netplay_delay, 0,
               "Report at least the RTT the game needs for this much input "
               "delay in frames (2-12; 0 = report the real RTT).",
               "Netplay");
+DEFINE_bool(netplay_rename_profile, false,
+            "Rename the signed-in profile to --netplay_name, so a name typed "
+            "at launch always wins over the one baked into the save data.",
+            "Netplay");
 
 namespace xe {
 namespace kernel {
@@ -215,6 +220,36 @@ void NetplayState::EnsureProfile() {
   auto* profiles = kernel_state_->xam_state()->profile_manager();
   if (!profiles) {
     return;
+  }
+
+  // The gamertag is baked in on first launch, so rename on request. Only when
+  // there is exactly one account: with several, we can't tell which is ours.
+  // Done before sign-in so no logout/login cycle is needed.
+  if (cvars::netplay_rename_profile && !name_.empty()) {
+    const auto* accounts = profiles->GetAccounts();
+    if (accounts && accounts->size() == 1) {
+      const uint64_t xuid = accounts->begin()->first;
+      const auto* current = profiles->GetAccount(xuid);
+      // 15 characters is the gamertag limit; copy_and_swap adds the null.
+      std::u16string wanted = xe::to_utf16(name_);
+      if (wanted.size() > 15) {
+        wanted.resize(15);
+      }
+      if (current && xe::to_utf16(current->GetGamertagString()) != wanted) {
+        xam::X_XAMACCOUNTINFO account = *current;
+        const bool renamed = profiles->ModifyAccount(
+            xuid, account, [&wanted](xam::X_XAMACCOUNTINFO& info) {
+              xe::string_util::copy_and_swap_truncating(
+                  info.gamertag, wanted, xe::countof(info.gamertag));
+              return true;
+            });
+        XELOGI("netplay: rename profile to '{}': {}", name_,
+               renamed ? "ok" : "failed");
+      }
+    } else if (accounts) {
+      XELOGI("netplay: {} accounts, not renaming any of them",
+             accounts->size());
+    }
   }
 
   bool signed_in = profiles->IsAnyProfileSignedIn();

@@ -34,6 +34,13 @@ class AudioDriver {
   virtual void Pause() = 0;
   virtual void Resume() = 0;
   virtual void SetVolume(float volume) = 0;
+
+  // Render client this driver belongs to (the guest's XAudio client index).
+  void set_client_index(int index) { client_index_ = index; }
+  int client_index() const { return client_index_; }
+
+ private:
+  int client_index_ = -1;
 };
 
 }  // namespace apu

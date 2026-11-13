@@ -110,6 +110,9 @@ class XAudio2AudioDriver : public AudioDriver {
 
   float frames_[frame_count_][kFrameSamplesMax];
   uint32_t current_frame_ = 0;
+
+  // Diagnostics: last observed activity state for this render client.
+  bool level_active_ = false;
 };
 
 }  // namespace xaudio2

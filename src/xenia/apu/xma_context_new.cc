@@ -8,6 +8,7 @@
 */
 
 #include "xenia/apu/xma_context_new.h"
+#include "xenia/apu/music_log.h"
 #include "xenia/apu/xma_helpers.h"
 
 #include "xenia/base/logging.h"
@@ -587,8 +588,13 @@ void XmaContextNew::Decode(XMA_CONTEXT_DATA* data) {
   PreparePacket(packet_info.current_frame_size_, padding_start);
   if (DecodePacket(av_context_, av_packet_, av_frame_)) {
     // dump_raw(av_frame_, id());
-    ConvertFrame(reinterpret_cast<const uint8_t**>(&av_frame_->data),
-                 bool(data->is_stereo), raw_frame_.data());
+    if (ShouldMuteMusicContext(id())) {
+      // Custom music replaces this bank: keep timing, drop the samples.
+      raw_frame_.fill(0);
+    } else {
+      ConvertFrame(reinterpret_cast<const uint8_t**>(&av_frame_->data),
+                   bool(data->is_stereo), raw_frame_.data());
+    }
     current_frame_remaining_subframes_ = 4 << data->is_stereo;
 
     // Loop end: limit output to subframes 0..loop_subframe_end.

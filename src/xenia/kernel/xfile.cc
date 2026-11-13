@@ -10,6 +10,7 @@
 #include "xenia/kernel/xfile.h"
 #include "xenia/vfs/virtual_file_system.h"
 
+#include "xenia/apu/music_log.h"
 #include "xenia/base/byte_stream.h"
 #include "xenia/kernel/kernel_state.h"
 
@@ -157,20 +158,39 @@ X_STATUS XFile::ReadInternal(uint32_t buffer_guest_address,
                 memory::PageAccess::kReadWrite) {
           result = X_STATUS_ACCESS_VIOLATION;
         } else {
+          uint8_t* destination =
+              buffer_physical_heap
+                  ? memory()->TranslatePhysical(
+                        buffer_physical_heap->GetPhysicalAddress(
+                            buffer_guest_address))
+                  : memory()->TranslateVirtual(buffer_guest_address);
           result = file_->ReadSync(
-              std::span<uint8_t>(
-                  buffer_physical_heap
-                      ? memory()->TranslatePhysical(
-                            buffer_physical_heap->GetPhysicalAddress(
-                                buffer_guest_address))
-                      : memory()->TranslateVirtual(buffer_guest_address),
-                  buffer_length),
+              std::span<uint8_t>(destination, buffer_length),
               size_t(byte_offset), &bytes_read);
           if (XSUCCEEDED(result)) {
             if (buffer_physical_heap) {
               buffer_physical_heap->TriggerCallbacks(
                   xe::global_critical_region::AcquireDirect(),
                   buffer_guest_address, buffer_length, true, true);
+            }
+
+            // Wave banks: remember where the data landed so XMA playback can
+            // name the bank (custom music groundwork).
+            if (bytes_read && buffer_physical_heap &&
+                byte_offset <= UINT32_MAX) {
+              const std::string& path = file_->entry()->absolute_path();
+              if (apu::IsWaveBankPath(path)) {
+                apu::RegisterWaveBankRange(
+                    path, uint32_t(byte_offset),
+                    buffer_physical_heap->GetPhysicalAddress(
+                        buffer_guest_address),
+                    uint32_t(bytes_read));
+                // Music is mixed by the guest, so the only way to silence the
+                // original track is to zero the bank's PCM in guest memory.
+                apu::SilenceWaveBankData(path, destination,
+                                         uint32_t(byte_offset),
+                                         uint32_t(bytes_read));
+              }
             }
 
             if (byte_offset) {
